@@ -9,8 +9,8 @@ from PIL import Image
 import pygame
 from pydub import AudioSegment
 import sys
-import traceback
 import os
+import uuid
 
 class App:
     def __init__(self):
@@ -181,39 +181,71 @@ def show_countdown(countdown_seconds):
     except Exception as e:
         app.write_log(f"Error in countdown display: {e}")
 
-def play_audio_from_last_x_seconds(audio_file_path, countdown_seconds):
+def preload_audio(audio_file_path):
     """
-    使用 pygame 播放音频文件，从倒数 countdown_seconds 秒开始播放。
-    
-    :param audio_file_path: 音频文件的路径，必须是 .wav 格式
-    :param countdown_seconds: 倒数播放的秒数
+    预加载音频文件并返回音频数据
+    :param audio_file_path: 音频文件路径
     """
     try:
+        # 使用 pydub 加载音频文件并返回音频片段
         audio = AudioSegment.from_file(audio_file_path)
-        
+        return audio
+    except Exception as e:
+        app.write_log(f"Error preloading audio: {e}")
+        return None
+
+def play_preloaded_audio(audio, countdown_seconds):
+    """
+    播放预加载的音频文件，使用唯一的临时文件避免冲突
+    :param audio: 预加载的音频数据
+    :param countdown_seconds: 倒计时时间，决定从音频的倒数几秒开始播放
+    """
+    try:
         # 初始化 pygame 的混音器
         pygame.mixer.init()
-        pygame.mixer.music.load(audio_file_path)
-        pygame.mixer.music.play(loops=0, start=len(audio) / 1000 - countdown_seconds + 0.3)
+
+        # 使用唯一的临时文件名
+        temp_audio_file = f"temp_audio_{uuid.uuid4()}.wav"
         
+        # 截取音频倒数 countdown_seconds 的部分
+        start_time_ms = len(audio) - (countdown_seconds * 1000) + 300
+        audio_to_play = audio[start_time_ms:]
+        
+        # 导出为临时音频文件
+        audio_to_play.export(temp_audio_file, format="wav")
+        
+        # 播放音频
+        pygame.mixer.music.load(temp_audio_file)
+        pygame.mixer.music.play()
+
         # 等待音频播放完成
         while pygame.mixer.music.get_busy():
             pygame.time.Clock().tick(10)
-        
-    except Exception as e:
-        app.write_log(f"Error processing audio file with pygame: {e}")
 
-def play_audio_and_show_countdown(audio_file_path, countdown_seconds):
+        # 停止并释放 pygame 资源
+        pygame.mixer.music.stop()
+        pygame.mixer.quit()
+
+        # 删除临时文件
+        if os.path.exists(temp_audio_file):
+            os.remove(temp_audio_file)
+
+    except Exception as e:
+        app.write_log(f"Error playing preloaded audio: {e}")
+
+def play_audio_and_show_countdown(audio, countdown_seconds):
     """
-    同时播放音频文件和显示倒计时窗口，倒计时时长为 countdown_seconds。
+    同时播放预加载的音频文件和显示倒计时窗口，倒计时时长为 countdown_seconds。
     
-    :param audio_file_path: 音频文件的路径
+    :param audio: 预加载的音频数据
     :param countdown_seconds: 倒计时时长
     """
     try:
-        audio_thread = threading.Thread(target=play_audio_from_last_x_seconds, args=(audio_file_path, countdown_seconds))
+        # 创建一个线程来播放音频
+        audio_thread = threading.Thread(target=play_preloaded_audio, args=(audio, countdown_seconds))
         audio_thread.start()
-        
+
+        # 显示倒计时窗口
         show_countdown(countdown_seconds)
     except Exception as e:
         app.write_log(f"Error in countdown or audio playback: {e}")
@@ -229,11 +261,11 @@ def adjust_time_by_seconds(target_time, countdown_seconds):
     adjusted_time = target_time - datetime.timedelta(seconds=countdown_seconds)
     return adjusted_time
 
-def check_time_and_trigger(audio_file_path, target_time, countdown_seconds):
+def check_time_and_trigger(audio, target_time, countdown_seconds):
     """
     在指定的时间（精确到秒）触发音频播放和倒计时显示。
     
-    :param audio_file_path: 音频文件的路径
+    :param audio: 预加载的音频数据
     :param target_time: 目标时间，格式为 'HH:MM:SS'，例如 '14:30:15'
     :param countdown_seconds: 倒计时时长
     """
@@ -251,22 +283,22 @@ def check_time_and_trigger(audio_file_path, target_time, countdown_seconds):
             current_time.second == adjusted_time.second):
             try:
                 app.write_log(f"提前 {countdown_seconds} 秒到达指定时间 {target_time}，正在播放音频并显示倒计时...")
-                play_audio_and_show_countdown(audio_file_path, countdown_seconds)
+                play_audio_and_show_countdown(audio, countdown_seconds)
             except Exception as e:
                 app.write_log(f"Error triggering countdown: {e}")
             break
         time.sleep(0.5)  # 更新间隔
 
-def run_in_background(audio_file_path, target_times, countdown_seconds):
+def run_in_background(audio, target_times, countdown_seconds):
     """
     启动多个后台线程来分别在多个时间播放音频和显示倒计时窗口。
     
-    :param audio_file_path: 音频文件的路径
+    :param audio: 预加载的音频数据
     :param target_times: 目标时间的列表，每个时间的格式为 'HH:MM:SS'
     :param countdown_seconds: 倒计时时长
     """
     for target_time in target_times:
-        background_thread = threading.Thread(target=check_time_and_trigger, args=(audio_file_path, target_time, countdown_seconds))
+        background_thread = threading.Thread(target=check_time_and_trigger, args=(audio, target_time, countdown_seconds))
         background_thread.daemon = True
         background_thread.start()
 
@@ -288,11 +320,14 @@ def read_settings_from_ini(file_path='settings.ini'):
 # 从配置文件读取设置
 audio_path, alarm_times, countdown_seconds = read_settings_from_ini('settings.ini')
 
+# 预加载音频文件
+audio_data = preload_audio(audio_path)
+
 # 创建主应用实例
 app = App()
 
 # 运行程序
-run_in_background(audio_path, alarm_times, countdown_seconds)
+run_in_background(audio_data, alarm_times, countdown_seconds)
 
 # 主线程保持运行，日志窗口显示所有信息
 app.write_log("程序已经开始运行，等待触发器执行。")
